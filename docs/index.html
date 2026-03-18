@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Notatki</title>
+</head>
+
+<body>
+<p>Wybierz wersję</p>
+<a href="wasm" class="glow">WebAssembly</a>
+<a href="js" class="glow">JavaScript</a>
+</body>
+<style>
+    body {
+        font-family: 'system-ui';
+        font-size: x-large;
+        background-color: #000;
+        padding-top: 100px;
+        text-align: center;
+    }
+
+    .glow:hover {
+        color: white;
+        text-shadow: 0 0 10px white;
+        transition: 0.4s all;
+        transform: translateY(-10px);
+    }
+
+    .glow {
+        display: inline-block;
+        width: 150px;
+        margin: 5px;
+        text-shadow: none;
+
+        text-decoration: none;
+        color: black;
+        text-align: center;
+        padding: 20px 20px;
+        transition: 0.4s all;
+
+        backdrop-filter: blur(2px);
+        background-color: rgba(255, 255, 255, 0.3);
+        border: 1px solid rgba(255, 255, 255, 0.15);
+    }
+</style>
+</html>
