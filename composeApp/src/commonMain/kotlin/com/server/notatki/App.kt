@@ -5,6 +5,7 @@
     import androidx.compose.runtime.*
     import androidx.compose.ui.Alignment
     import androidx.compose.ui.Modifier
+    import androidx.compose.ui.platform.LocalClipboard
     import androidx.compose.ui.unit.dp
     import androidx.compose.ui.window.Dialog
     import com.server.notatki.ui.theme.AppTheme
@@ -16,7 +17,6 @@
     import io.ktor.client.plugins.websocket.*
     import io.ktor.websocket.*
     import kotlinx.coroutines.flow.MutableSharedFlow
-    import kotlinx.coroutines.flow.MutableStateFlow
 
     @Composable
     fun App() {
@@ -30,6 +30,7 @@
     @OptIn(ExperimentalMaterial3ExpressiveApi::class)
     @Composable
     fun NoteScreen(paddingValues: PaddingValues) {
+        val clipboard = LocalClipboard.current
         @Suppress("LocalVariableName") var SERVER_URL by remember { mutableStateOf("http://192.168.0.2:5000") }
         var userId by remember { mutableStateOf("") }
         var noteContent by remember { mutableStateOf("") }
@@ -38,6 +39,8 @@
         var shareId by remember { mutableStateOf("") }
         var isShareDialogOpen by remember { mutableStateOf(false) }
         var isSetupDialogOpen by remember { mutableStateOf(true) }
+
+        var serverUrlInput by remember { mutableStateOf(SERVER_URL) }
 
         val scope = rememberCoroutineScope()
         val client = remember { HttpClient{
@@ -55,29 +58,23 @@
                         port = 8000,
                         path = "/ws/notifications"
                     ) {
-                        // 2a. Wątek do WYSYŁANIA na serwer (nasłuchuje zmian z TextField)
                         val sendJob = launch {
                             outgoingTextFlow.collect { newText ->
-                                // Ktor ma wbudowaną funkcję send() dla tekstu wewnątrz tej sesji
                                 send(newText)
                             }
                         }
 
-                        // 2b. Wątek do ODBIERANIA z serwera (Twój dotychczasowy kod)
                         val receiveJob = launch {
                             for (frame in incoming) {
                                 frame as? Frame.Text ?: continue
                                 val textReceived = frame.readText()
 
-                                // WAŻNE: Aktualizujemy UI tylko, jeśli tekst faktycznie się różni,
-                                // aby uniknąć problemów z przeskakującym kursorem.
                                 if (noteContent != textReceived) {
                                     noteContent = textReceived
                                 }
                             }
                         }
 
-                        // Czekamy, aż połączenie zostanie zerwane
                         sendJob.join()
                         receiveJob.join()
                     }
@@ -170,10 +167,8 @@
                 TextField(
                     value = noteContent,
                     onValueChange = { newText ->
-                        // 1. Aktualizuj tekst lokalnie (żebyś widział, co piszesz)
                         noteContent = newText
 
-                        // 2. Wyślij ten sam tekst do WebSocketu w tle
                         scope.launch {
                             outgoingTextFlow.emit(newText)
                         }
@@ -213,6 +208,9 @@
                 Spacer(modifier = Modifier.height(16.dp))
 
                 if (statusMessage.isNotEmpty()) {
+                    //Dialog {
+
+                    //}
                     Card(
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
                         modifier = Modifier.fillMaxWidth()
@@ -223,7 +221,7 @@
             }
 
             if (isShareDialogOpen) {
-                Dialog({isShareDialogOpen = false}) {
+                Dialog(onDismissRequest = {isShareDialogOpen = false}) {
                    Column {
                         TextField(
                             value = shareId,
@@ -240,15 +238,26 @@
         }
 
         if (isSetupDialogOpen) {
-            Dialog({isSetupDialogOpen = false}) {
+            Dialog(onDismissRequest = {isSetupDialogOpen = false}) {
+                LaunchedEffect(Unit) {
+                    getClipboardText(clipboard)?.let { text ->
+                        if (text.startsWith("http")) {
+                            serverUrlInput = text
+                        }
+                    }
+                }
                 Column {
                     TextField(
-                        value = SERVER_URL,
-                        onValueChange = { SERVER_URL = it },
+                        value = serverUrlInput,
+                        onValueChange = { serverUrlInput = it },
                         label = { Text("Wpisz adres serwera") },
                         modifier = Modifier.fillMaxWidth().padding(top = 8.dp)
                     )
-                    Button(onClick = { isSetupDialogOpen = false; connectToWebsocket() }) {
+                    Button(onClick = { 
+                        SERVER_URL = serverUrlInput
+                        isSetupDialogOpen = false
+                        connectToWebsocket() 
+                    }) {
                         Text("OK")
                     }
                 }
