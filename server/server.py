@@ -1,80 +1,51 @@
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-import json
-import uuid
-import os
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import uvicorn
 import socket
-
-app = Flask(__name__)
-CORS(app) 
-
-DATA_FILE = 'data.json'
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
-    except Exception:
-        ip = "127.0.0.1"
     finally:
         s.close()
     return ip
 
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r') as f:
-            return json.load(f)
-    return {"backups": {}, "shares": {}}
+print("Local IP:", get_local_ip())
 
-def save_data(data):
-    with open(DATA_FILE, 'w') as f:
-        json.dump(data, f)
+app = FastAPI()
 
+if __name__ == "__main__":
+    uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)
 
-@app.route('/backup', methods=['POST'])
-def backup():
-    req = request.json
-    user_id = req.get('user_id')
-    content = req.get('content')
-    
-    data = load_data()
-    data["backups"][user_id] = content
-    save_data(data)
-    
-    return "Notatka zapisana dla " + user_id
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: dict[str, list[WebSocket]] = {}
 
-@app.route('/backup/<user_id>', methods=['GET'])
-def get_backup(user_id):
-    data = load_data()
-    content = data["backups"].get(user_id)
-    if content is None: 
-        return "Nie znaleziono!"
-    return content
+    async def connect(self, websocket: WebSocket, share_id: str):
+        await websocket.accept()
+        if share_id not in self.active_connections:
+            self.active_connections[share_id] = []
+        self.active_connections[share_id].append(websocket)
 
-@app.route('/share', methods=['POST'])
-def share():
-    content = request.json.get('content', '')
-    user_id = request.json.get('user_id', '')
-    
-    data = load_data()
-    data["shares"][user_id] = content
-    save_data(data)
-    
-    return "Notatka udostępniona dla " + user_id
+    def disconnect(self, websocket: WebSocket, share_id: str):
+        self.active_connections[share_id].remove(websocket)
+        if not self.active_connections[share_id]:
+            del self.active_connections[share_id]
 
-@app.route('/share/<share_id>', methods=['GET'])
-def get_share(share_id):
-    data = load_data()
-    content = data["shares"].get(share_id)
-    if content is None: 
-        return "Nie znaleziono!"
-    return content
+    async def broadcast(self, message: str, share_id: str, sender: WebSocket):
+        for connection in self.active_connections.get(share_id, []):
+            if connection != sender:
+                await connection.send_text(message)
 
-if __name__ == '__main__':
-    local_ip = get_local_ip()
-    print(f"Starting server on:")
-    print(f"  http://127.0.0.1:5000")
-    print(f"  http://{local_ip}:5000")
+manager = ConnectionManager()
 
-    app.run(host="0.0.0.0", port=5000, debug=True)
+@app.websocket("/ws/notatki/{share_id}")
+async def websocket_endpoint(websocket: WebSocket, share_id: str):
+    await manager.connect(websocket, share_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await manager.broadcast(data, share_id, sender=websocket)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, share_id)
