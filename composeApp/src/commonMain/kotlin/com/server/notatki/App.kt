@@ -17,9 +17,9 @@
     import io.ktor.client.plugins.websocket.*
     import io.ktor.websocket.*
     import kotlinx.coroutines.flow.MutableSharedFlow
-
+/*
     @Composable
-    fun App() {
+    fun App2() {
         AppTheme {
             Scaffold { paddingValues ->
                 NoteScreen(paddingValues)
@@ -147,6 +147,7 @@
                     method = HttpMethod.Get
                 }
                 noteContent = response.bodyAsText()
+
             }
         }
 
@@ -264,3 +265,6 @@
             }
         }
     }
+
+
+ */
