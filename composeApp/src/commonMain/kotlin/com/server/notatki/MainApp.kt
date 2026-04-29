@@ -19,6 +19,8 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.snap
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandIn
+import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkOut
 import androidx.compose.animation.slideInVertically
@@ -27,12 +29,14 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.add
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -41,6 +45,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeContentPadding
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -96,28 +101,42 @@ import androidx.compose.material3.ToggleFloatingActionButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.semantics.setText
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import com.server.notatki.ui.theme.darkScheme
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
 import dev.chrisbanes.haze.hazeEffect
 import dev.chrisbanes.haze.hazeSource
 import dev.chrisbanes.haze.rememberHazeState
@@ -140,12 +159,19 @@ fun App() {
     val clipboard = LocalClipboard.current
     @Suppress("LocalVariableName") var SERVER_URL by remember { mutableStateOf("http://192.168.0.2:5000") }
     var userId by remember { mutableStateOf("") }
-    var noteContent by remember { mutableStateOf("") }
+    var noteContent by remember { mutableStateOf(TextFieldValue("")) }
+    val undoStack = remember { mutableStateListOf<TextFieldValue>() }
+    val redoStack = remember { mutableStateListOf<TextFieldValue>() }
+
+    var savedNotes by remember { mutableStateOf(mutableListOf<String>()) }
+
     var statusMessage by remember { mutableStateOf("") }
 
     var shareId by remember { mutableStateOf("") }
     var isShareDialogOpen by remember { mutableStateOf(false) }
     var isSetupDialogOpen by remember { mutableStateOf(true) }
+    var isInfoDialogOpen by remember { mutableStateOf(false) }
+    var infoText by remember { mutableStateOf("") }
 
     var serverUrlInput by remember { mutableStateOf(SERVER_URL) }
 
@@ -156,16 +182,16 @@ fun App() {
     } }
 
     var lastEditor by remember { mutableStateOf<String?>(null) }
-    var username by remember { mutableStateOf("Guest") }
+    var username by remember { mutableStateOf("Gość") }
     val outgoingTextFlow = remember { MutableSharedFlow<String>(extraBufferCapacity = 10) }
-    fun connectToWebsocket() {
+    fun connectToWebsocket(shareId: String) {
         scope.launch {
             try {
                 client.webSocket(
                     method = HttpMethod.Get,
                     host = SERVER_URL.substringAfter("//").substringBefore(":"),
                     port = 8000,
-                    path = "/ws/notatki"
+                    path = "/ws/notatki/$shareId"
                 ) {
                     val sendJob = launch {
                         outgoingTextFlow.collect { newText ->
@@ -184,8 +210,8 @@ fun App() {
                             try {
                                 val update = Json.decodeFromString<NoteUpdate>(textReceived)
 
-                                if (noteContent != update.content) {
-                                    noteContent = update.content
+                                if (noteContent.text != update.content) {
+                                    noteContent = TextFieldValue(update.content)
                                     lastEditor = update.username
                                 }
                             } catch (e: Exception) {
@@ -201,6 +227,21 @@ fun App() {
                 println("Błąd połączenia: ${e.message}")
             }
         }
+    }
+
+    fun showInfo(txt: String) {
+        val characters = txt.length
+        val charactersNoSpaces = txt.count { !it.isWhitespace() }
+        val words = txt.split(Regex("\\s+")).filter { it.isNotBlank() }.size
+        val sentences = txt.split(Regex("[.!?]+")).filter { it.isNotBlank() }.size
+        val lines = if (txt.isEmpty()) 0 else txt.lines().size
+
+        infoText = "Znaki: $characters\n" +
+                "Znaki (bez spacji): $charactersNoSpaces\n" +
+                "Słowa: $words\n" +
+                "Zdania: $sentences\n" +
+                "Linijki: $lines"
+        isInfoDialogOpen = true
     }
 
     fun request(doStuff: suspend () -> Unit) {
@@ -222,7 +263,7 @@ fun App() {
             val response: HttpResponse = client.request("$SERVER_URL/backup") {
                 method = HttpMethod.Post
                 header("Content-Type", "application/json")
-                setBody("{\"user_id\": \"$userId\", \"content\": \"$noteContent\"}")
+                setBody("{\"user_id\": \"$userId\", \"content\": \"$noteContent.text\"}")
             }
             statusMessage = response.bodyAsText()
         }
@@ -237,7 +278,7 @@ fun App() {
             val response: HttpResponse = client.request("$SERVER_URL/backup/$userId") {
                 method = HttpMethod.Get
             }
-            noteContent = response.bodyAsText()
+            noteContent = TextFieldValue(response.bodyAsText())
         }
     }
 
@@ -250,13 +291,13 @@ fun App() {
             val response: HttpResponse = client.request("$SERVER_URL/share") {
                 method = HttpMethod.Post
                 header("Content-Type", "application/json")
-                setBody("{\"user_id\": \"$userId\", \"content\": \"$noteContent\"}")
+                setBody("{\"user_id\": \"$userId\", \"content\": \"$noteContent.text\"}")
             }
             statusMessage = response.bodyAsText()
         }
     }
 
-    fun loadShared() {
+    /*fun loadShared() {
         if (shareId.isBlank()) {
             statusMessage = "Podaj ID udostępnienia!"
             return
@@ -265,10 +306,10 @@ fun App() {
             val response: HttpResponse = client.request("$SERVER_URL/share/$shareId") {
                 method = HttpMethod.Get
             }
-            noteContent = response.bodyAsText()
+            noteContent.text = TextFieldValue(response.bodyAsText()
 
         }
-    }
+    }*/
 
 
     var showToolbar by remember { mutableStateOf(true) }
@@ -282,11 +323,11 @@ fun App() {
     MaterialExpressiveTheme(colorScheme = darkScheme) {
         Scaffold(snackbarHost = { SnackbarHost(snackbarHost) { Snackbar(it, containerColor = MaterialTheme.colorScheme.surfaceVariant, contentColor = MaterialTheme.colorScheme.onSurfaceVariant) } })
         {
+            val hazeState = rememberHazeState()
             AnimatedContent(currentScreen2) { screen ->
                 when(screen) {
                     0, 1 -> {
                         Box {
-                            val hazeState = rememberHazeState()
                             BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
                                 val screenHeight = maxHeight
 
@@ -309,6 +350,7 @@ fun App() {
                                         .fillMaxWidth()
                                         .heightIn(min = minTextFieldHeight)
                                         .safeContentPadding()
+                                        .padding(horizontal = 8.dp)
 
                                     Column(modifier = Modifier.fillMaxSize()) {
 
@@ -325,10 +367,15 @@ fun App() {
                                         }
 
                                         BasicTextField(
-                                            value = noteContent,
-                                            onValueChange = {
-                                                noteContent = it
-                                                scope.launch { outgoingTextFlow.emit(it) }
+                                            value = noteContent.text,
+                                            onValueChange = { newValue ->
+                                                if (newValue != noteContent.text) {
+                                                    undoStack.add(noteContent)
+                                                    redoStack.clear()
+                                                    if (undoStack.size > 50) undoStack.removeAt(0)
+                                                    scope.launch { outgoingTextFlow.emit(newValue) }
+                                                }
+                                                noteContent = TextFieldValue(newValue)
                                             },
                                             textStyle = TextStyle(
                                                 color = MaterialTheme.colorScheme.onBackground,
@@ -391,11 +438,58 @@ fun App() {
                                         )
                                     )
                                     {
-                                        IconBtn(Icons.AutoMirrored.Filled.Undo, "Undo")
-                                        IconBtn(Icons.AutoMirrored.Filled.Redo, "Redo")
-                                        IconBtn(Icons.Default.ContentCopy, "Copy")
-                                        IconBtn(Icons.Default.ContentCut, "Cut")
-                                        IconBtn(Icons.Default.ContentPaste, "Paste")
+                                        IconBtn(Icons.AutoMirrored.Filled.Undo, "Cofnij", Modifier.alpha(if (undoStack.isNotEmpty()) 1F else .5F)) {
+                                            if (undoStack.isNotEmpty()) {
+                                                redoStack.add(noteContent)
+                                                noteContent = undoStack.removeAt(undoStack.size - 1)
+                                                scope.launch { outgoingTextFlow.emit(noteContent.text) }
+                                            }
+                                        }
+
+                                        IconBtn(Icons.AutoMirrored.Filled.Redo, "Ponów", Modifier.alpha(if (redoStack.isNotEmpty()) 1F else .5F)) {
+                                            if (redoStack.isNotEmpty()) {
+                                                undoStack.add(noteContent)
+                                                noteContent = redoStack.removeAt(redoStack.size - 1)
+                                                scope.launch { outgoingTextFlow.emit(noteContent.text) }
+                                            }
+                                        }
+
+                                        IconBtn(Icons.Default.ContentCopy, "Kopiuj") {
+                                            val selected = noteContent.text.substring(noteContent.selection.min, noteContent.selection.max)
+                                            if (selected.isNotEmpty()) {
+                                                scope.launch {
+                                                    setClipboardText(clipboard, selected)
+                                                }
+                                            }
+                                        }
+
+                                        IconBtn(Icons.Default.ContentCut, "Wytnij") {
+                                            val selected = noteContent.text.substring(noteContent.selection.min, noteContent.selection.max)
+                                            if (selected.isNotEmpty()) {
+                                                scope.launch {
+                                                    setClipboardText(clipboard, selected)
+                                                    val newText = noteContent.text.removeRange(noteContent.selection.min, noteContent.selection.max)
+                                                    undoStack.add(noteContent)
+                                                    noteContent = TextFieldValue(newText, TextRange(noteContent.selection.min))
+                                                    outgoingTextFlow.emit(newText)
+                                                }
+                                            }
+                                        }
+
+                                        IconBtn(Icons.Default.ContentPaste, "Wklej") {
+                                            scope.launch {
+                                                val textToPaste = getClipboardText(clipboard) ?: ""
+                                                if (textToPaste.isNotEmpty()) {
+                                                    val newText = noteContent.text.replaceRange(noteContent.selection.min, noteContent.selection.max, textToPaste)
+                                                    undoStack.add(noteContent)
+                                                    noteContent =
+                                                        TextFieldValue(newText,
+                                                            TextRange(noteContent.selection.min + textToPaste.length)
+                                                        )
+                                                    outgoingTextFlow.emit(newText)
+                                                }
+                                            }
+                                        }
                                     }
                                 }
 
@@ -405,30 +499,33 @@ fun App() {
                                     }
                                 })
                                 {
+                                    val uri = LocalUriHandler.current
 
-                                    FloatingActionButtonMenuItem({}, { Text("Settings") }, { Icon(Icons.Rounded.Settings, "Settings") })
+                                    FloatingActionButtonMenuItem({isSetupDialogOpen = true; exp = 0}, { Text("Ustawienia") }, { Icon(Icons.Rounded.Settings, "Ustawienia") })
 
-                                    FloatingActionButtonMenuItem({}, { Text("Info") }, { Icon(Icons.Rounded.Info, "Info") })
+                                    FloatingActionButtonMenuItem({ showInfo(noteContent.text); exp = 0 }, { Text("Informacje") }, { Icon(Icons.Rounded.Info, "Informacje") })
 
-                                    FloatingActionButtonMenuItem({}, { Text("Translate") }, { Icon(Icons.Rounded.Translate, "Translate") })
+                                    FloatingActionButtonMenuItem({ uri.openUri("https://translate.google.com/?text=${noteContent.text.encodeURLPathPart()}"); exp = 0 }, { Text("Tłumacz") }, { Icon(Icons.Rounded.Translate, "Tłumacz") })
 
-                                    FloatingActionButtonMenuItem({}, { Text("Read") }, { Icon(Icons.AutoMirrored.Rounded.VolumeUp, "Read") })
+                                    //FloatingActionButtonMenuItem({}, { Text("Zamień") }, { Icon(Icons.Rounded.FindReplace, "Zamień") })
 
-                                    FloatingActionButtonMenuItem({}, { Text("Replace") }, { Icon(Icons.Rounded.FindReplace, "Replace") })
+                                    //FloatingActionButtonMenuItem({}, { Text("Szukaj") }, { Icon(Icons.Rounded.Search, "Szukaj") })
 
-                                    FloatingActionButtonMenuItem({}, { Text("Find") }, { Icon(Icons.Rounded.Search, "Find") })
+                                    //FloatingActionButtonMenuItem({}, { Text("Przypnij") }, { Icon(Icons.AutoMirrored.Rounded.CallReceived, "Przypnij", modifier = Modifier.graphicsLayer(scaleY = -1f, scaleX = -1f)) })
 
-                                    FloatingActionButtonMenuItem({}, { Text("Pin") }, { Icon(Icons.AutoMirrored.Rounded.CallReceived, "Pin", modifier = Modifier.graphicsLayer(scaleY = -1f, scaleX = -1f)) })
+                                    //FloatingActionButtonMenuItem({}, { Text("Udostępnij") }, { Icon(Icons.Rounded.Share, "Udostępnij") })
 
-                                    FloatingActionButtonMenuItem({}, { Text("Share") }, { Icon(Icons.Rounded.Share, "Share") })
-
-                                    FloatingActionButtonMenuItem({}, { Text("Delete") }, { Icon(Icons.Rounded.Close, "Delete") })
-
-                                    FloatingActionButtonMenuItem({}, { Text("Save") }, { Icon(Icons.Rounded.Save, "Save") })
+                                    FloatingActionButtonMenuItem({undoStack.add(noteContent); noteContent = TextFieldValue(""); exp = 0}, { Text("Usuń") }, { Icon(Icons.Rounded.Close, "Usuń") })
 
                                     FloatingActionButtonMenuItem({
-                                        currentScreen = 1; exp = 0;
-                                    }, { Text("Open") }, { Icon(Icons.AutoMirrored.Rounded.OpenInNew, "Open") })
+                                        if (noteContent.text.isNotBlank()) {
+                                            savedNotes.add(noteContent.text); exp = 0
+                                        }
+                                    }, { Text("Zapisz") }, { Icon(Icons.Rounded.Save, "Zapisz") })
+
+                                    FloatingActionButtonMenuItem({
+                                        currentScreen = 1; exp = 0
+                                    }, { Text("Otwórz") }, { Icon(Icons.AutoMirrored.Rounded.OpenInNew, "Otwórz") })
                                 }
 
                                 FloatingActionButtonMenu(exp == 2, modifier = Modifier.align(Alignment.BottomEnd), button = {
@@ -440,12 +537,12 @@ fun App() {
                                     var showSize by remember { mutableStateOf(false) }
                                     FloatingActionButtonMenuItem(
                                         { showToolbar = !showToolbar },
-                                        { Text("Toolbar"); Switch(showToolbar, { showToolbar = !showToolbar }) },
+                                        { Text("Pasek narzędzi"); Switch(showToolbar, { showToolbar = !showToolbar }) },
                                         { Icon(Icons.Rounded.Apps, contentDescription = null) })
                                     FloatingActionButtonMenuItem(
                                         {},
                                         {
-                                            Text("Font size"); Slider(
+                                            Text("Rozmiar czcionki"); Slider(
                                             fontSize.toFloat(),
                                             { fontSize = it.roundToInt(); showSize = true },
                                             valueRange = 10F..50F,
@@ -461,19 +558,31 @@ fun App() {
                                         })
                                     FloatingActionButtonMenuItem(
                                         { wrapText = !wrapText },
-                                        { Text("Wrap text"); Switch(wrapText, { wrapText = !wrapText }) },
+                                        { Text("Zawijanie tekstu"); Switch(wrapText, { wrapText = !wrapText }) },
                                         { Icon(Icons.AutoMirrored.Rounded.WrapText, contentDescription = null) })
-                                    AnimatedVisibility(!showToolbar) {
+                                    AnimatedVisibility(!showToolbar, modifier = Modifier.alpha(if (redoStack.isNotEmpty()) 1F else .5F)) {
                                         FloatingActionButtonMenuItem(
-                                            {},
-                                            { Text("Redo") },
-                                            { Icon(Icons.AutoMirrored.Rounded.Redo, contentDescription = null) })
+                                            {
+                                                if (redoStack.isNotEmpty()) {
+                                                    undoStack.add(noteContent)
+                                                    noteContent = redoStack.removeAt(redoStack.size - 1)
+                                                    scope.launch { outgoingTextFlow.emit(noteContent.text) }
+                                                }
+                                            },
+                                            { Text("Ponów") },
+                                            { Icon(Icons.AutoMirrored.Rounded.Redo, contentDescription = null)})
                                     }
-                                    AnimatedVisibility(!showToolbar) {
+                                    AnimatedVisibility(!showToolbar, modifier = Modifier.alpha(if (undoStack.isNotEmpty()) 1F else .5F)) {
                                         FloatingActionButtonMenuItem(
-                                            {},
-                                            { Text("Undo") },
-                                            { Icon(Icons.AutoMirrored.Rounded.Undo, contentDescription = null) })
+                                            {
+                                                if (undoStack.isNotEmpty()) {
+                                                    redoStack.add(noteContent)
+                                                    noteContent = undoStack.removeAt(undoStack.size - 1)
+                                                    scope.launch { outgoingTextFlow.emit(noteContent.text) }
+                                                }
+                                            },
+                                            { Text("Cofnij") },
+                                            { Icon(Icons.AutoMirrored.Rounded.Undo, contentDescription = null)})
                                     }
                                     //FloatingActionButtonMenuItem(
                                     //    {},
@@ -483,30 +592,42 @@ fun App() {
                             }
                         }
 
-                        if (currentScreen == 1) {
-                            Box(Modifier.fillMaxSize())
-                            LazyColumn(Modifier.fillMaxSize().safeContentPadding()) {
-                                items(100) {
-                                    Row {
-                                        SavedNote(noteContent, Modifier)
-                                        SavedNote(noteContent, Modifier)
+
+
+                        AnimatedVisibility(currentScreen == 1, enter = fadeIn(), exit = fadeOut()) {
+                            Box(Modifier.fillMaxSize().hazeEffect(state = hazeState, style = HazeStyle(
+                                backgroundColor = MaterialTheme.colorScheme.surface,
+                                tint = HazeTint(Color.Black.copy(alpha = .2f)),
+                                blurRadius = 12.dp
+                            )
+                            ).safeContentPadding()) {
+                                if (savedNotes.isEmpty()) {
+                                   Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center, modifier = Modifier.fillMaxSize()) {
+                                       Text("Pusta lista", modifier = Modifier.align(Alignment.CenterHorizontally), color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.SemiBold, fontSize = 24.sp)
+                                       Text("Użyj przycisku 'Zapisz', aby dodać notatkę do listy na później", modifier = Modifier.align(Alignment.CenterHorizontally), color = MaterialTheme.colorScheme.onBackground)
+                                   }
+                                }
+                                else {
+                                    LazyColumn(Modifier.fillMaxSize().padding(all = 8.dp)) {
+                                        items(savedNotes.size) { index ->
+                                            Spacer(Modifier.size(8.dp))
+                                            Text(
+                                                savedNotes[index],
+                                                color = MaterialTheme.colorScheme.onBackground,
+                                                modifier = Modifier.clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant)
+                                                    .clickable {
+                                                        undoStack.add(noteContent)
+                                                        noteContent = TextFieldValue(savedNotes[index])
+                                                        currentScreen = 0
+                                                    }.padding(12.dp),
+                                                maxLines = 5
+                                            )
+                                        }
                                     }
                                 }
-                            }
-                            Button(modifier = Modifier.padding(10.dp), onClick = { currentScreen = 0 }) {
-                                Text("Close")
-                            }
-                        }
-                    }
-                    2 -> {
-                        HeroSection()
-                        Column(Modifier.fillMaxSize().safeContentPadding()) {
-                            Text("Saved notes", color = MaterialTheme.colorScheme.onBackground)
-                            Text("Empty list", modifier = Modifier.align(Alignment.CenterHorizontally), color = MaterialTheme.colorScheme.onBackground)
-                            Text("Use 'Save' button to add a note to the list for later use", modifier = Modifier.align(Alignment.CenterHorizontally), color = MaterialTheme.colorScheme.onBackground)
-                            Spacer(Modifier.height(100.dp))
-                            Button(modifier = Modifier.align(Alignment.CenterHorizontally).padding(10.dp), onClick = { currentScreen = 0 }) {
-                                Text("Close")
+                                Button(modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp), onClick = { currentScreen = 0 }) {
+                                    Text("Zamknij")
+                                }
                             }
                         }
                     }
@@ -515,10 +636,12 @@ fun App() {
 
             if (isSetupDialogOpen) {
                 Dialog(onDismissRequest = {isSetupDialogOpen = false}) {
-                    LaunchedEffect(Unit) {
-                        getClipboardText(clipboard)?.let { text ->
-                            if (text.startsWith("http")) {
-                                serverUrlInput = text
+                    if (getPlatform().name.contains("iOS", ignoreCase = true)) {
+                        LaunchedEffect(Unit) {
+                            getClipboardText(clipboard)?.let { text ->
+                                if (text.startsWith("http")) {
+                                    serverUrlInput = text
+                                }
                             }
                         }
                     }
@@ -526,15 +649,21 @@ fun App() {
                         TextField(
                             value = serverUrlInput,
                             onValueChange = { serverUrlInput = it },
-                            label = { Text("Wpisz adres serwera") },
+                            label = { Text("Adres serwera") },
                             shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
-                            modifier = Modifier.fillMaxWidth()//.padding(top = 8.dp)
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
                         )
                         TextField(
                             value = username,
                             onValueChange = { username = it },
-                            label = { Text("Username") },
-                            modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp)
+                            label = { Text("Nazwa użytkownika") },
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                        )
+                        TextField(
+                            value = shareId,
+                            onValueChange = { shareId = it },
+                            label = { Text("ID sesji kolaboracyjnej") },
+                            modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
                         )
                         //make button rounded only at bottom edges
                         Button(
@@ -542,9 +671,35 @@ fun App() {
                             onClick = {
                                 SERVER_URL = serverUrlInput
                                 isSetupDialogOpen = false
-                                connectToWebsocket()
+                                if (shareId.isNotBlank()) connectToWebsocket(shareId)
                             }, modifier = Modifier.fillMaxWidth()) {
                             Text("OK")
+                        }
+                    }
+                }
+            }
+
+
+            if (isInfoDialogOpen) {
+                Dialog(onDismissRequest = { isInfoDialogOpen = false }) {
+                    Column(
+                        Modifier
+                            .clip(RoundedCornerShape(28.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .padding(24.dp)
+                    ) {
+                        Text(
+                            text = "Informacje o tekście",
+                            style = MaterialTheme.typography.titleLarge,
+                            modifier = Modifier.padding(bottom = 16.dp)
+                        )
+                        Text(infoText, style = MaterialTheme.typography.bodyLarge)
+                        Spacer(Modifier.height(24.dp))
+                        Button(
+                            onClick = { isInfoDialogOpen = false },
+                            modifier = Modifier.align(Alignment.End)
+                        ) {
+                            Text("Zamknij")
                         }
                     }
                 }
@@ -770,8 +925,8 @@ fun calculateGradientHeight(): () -> Float {
     return { statusBars.getTop(density).times(1.2f) }
 }
 @Composable
-fun IconBtn(imageVector: ImageVector, contentDescription: String, modifier: Modifier = Modifier) {
-    Icon(imageVector, contentDescription, modifier.height(50.dp).clip(CircleShape).clickable {}.padding(6.dp))
+fun IconBtn(imageVector: ImageVector, contentDescription: String, modifier: Modifier = Modifier, onClick: () -> Unit = {}) {
+    Icon(imageVector, contentDescription, modifier.height(50.dp).clip(CircleShape).clickable {onClick()}.padding(6.dp))
 }
 @Composable
 fun HeroSection() {
@@ -791,8 +946,4 @@ fun HeroSection() {
     //    ),
     //    color = Color.White,
     //)
-}
-@Composable
-fun SavedNote(text: String, m: Modifier) {
-    Text(text, color = MaterialTheme.colorScheme.onBackground, modifier = m.padding(10.dp).clip(RoundedCornerShape(16.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(10.dp), maxLines = 5)
 }

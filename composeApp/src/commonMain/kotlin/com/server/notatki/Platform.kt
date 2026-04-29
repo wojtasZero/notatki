@@ -10,3 +10,5 @@ interface Platform {
 expect fun getPlatform(): Platform
 
 expect suspend fun getClipboardText(clipboard: Clipboard): String?
+
+expect suspend fun setClipboardText(clipboard: Clipboard, text: String)

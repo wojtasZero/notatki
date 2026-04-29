@@ -13,3 +13,7 @@ actual fun getPlatform(): Platform = IOSPlatform()
 actual suspend fun getClipboardText(clipboard: Clipboard): String? {
     return UIPasteboard.generalPasteboard.string
 }
+
+actual suspend fun setClipboardText(clipboard: Clipboard, text: String) {
+    UIPasteboard.generalPasteboard.string = text
+}

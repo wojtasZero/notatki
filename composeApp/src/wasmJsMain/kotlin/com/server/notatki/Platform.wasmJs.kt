@@ -17,3 +17,11 @@ actual suspend fun getClipboardText(clipboard: Clipboard): String? {
         null
     }
 }
+
+actual suspend fun setClipboardText(clipboard: Clipboard, text: String) {
+    try {
+        window.navigator.clipboard.writeText(text).await()
+    } catch (e: Exception) {
+        // ignore
+    }
+}
