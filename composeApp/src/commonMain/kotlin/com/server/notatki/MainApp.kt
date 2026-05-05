@@ -187,6 +187,7 @@ fun App() {
     fun connectToWebsocket(shareId: String) {
         scope.launch {
             try {
+                //todo: disconnect from websocket
                 client.webSocket(
                     method = HttpMethod.Get,
                     host = SERVER_URL.substringAfter("//").substringBefore(":"),
@@ -678,6 +679,7 @@ fun App() {
                     }
                 }
             }
+
 
 
             if (isInfoDialogOpen) {
