@@ -12,9 +12,16 @@ plugins {
     alias(libs.plugins.composeCompiler)
     alias(libs.plugins.composeHotReload)
     alias(libs.plugins.kotlinSerialization)
+    alias(libs.plugins.ksp)
+    alias(libs.plugins.androidx.room)
+}
+
+room {
+    schemaDirectory("$projectDir/schemas")
 }
 
 kotlin {
+    jvmToolchain(21)
     android {
         namespace = "com.server.notatki.compose"
         compileSdk = libs.versions.android.compileSdk.get().toInt()
@@ -46,12 +53,24 @@ kotlin {
     }
     
     sourceSets {
+        val nativeMain by creating {
+            dependsOn(commonMain.get())
+            dependencies {
+                implementation(libs.androidx.room.runtime)
+                implementation(libs.androidx.sqlite.bundled)
+            }
+        }
+        androidMain.get().dependsOn(nativeMain)
+        iosMain.get().dependsOn(nativeMain)
+        jvmMain.get().dependsOn(nativeMain)
+
         androidMain.dependencies {
             implementation(libs.compose.uiToolingPreview)
             implementation(libs.androidx.activity.compose)
             implementation(libs.ktor.client.okhttp)
         }
         commonMain.dependencies {
+            implementation("org.jetbrains.kotlinx:kotlinx-datetime:0.7.1")
             implementation(libs.material.icons.extended)
             implementation(libs.kotlinx.serialization.json)
             implementation(libs.compose.runtime)
@@ -72,6 +91,11 @@ kotlin {
         iosMain.dependencies {
             implementation(libs.ktor.client.darwin)
         }
+        val webMain by creating {
+            dependsOn(commonMain.get())
+        }
+        jsMain.get().dependsOn(webMain)
+        wasmJsMain.get().dependsOn(webMain)
         jvmMain.dependencies {
             implementation(compose.desktop.currentOs)
             implementation(libs.kotlinx.coroutinesSwing)
@@ -79,8 +103,6 @@ kotlin {
         }
     }
 }
-
-
 
 compose.desktop {
     application {
@@ -98,4 +120,14 @@ compose.desktop {
             packageVersion = "1.0.0"
         }
     }
+}
+
+dependencies {
+    add("kspAndroid", libs.androidx.room.compiler)
+    add("kspIosSimulatorArm64", libs.androidx.room.compiler)
+    add("kspIosX64", libs.androidx.room.compiler)
+    add("kspIosArm64", libs.androidx.room.compiler)
+    add("kspJvm", libs.androidx.room.compiler)
+    add("kspWasmJs", libs.androidx.room.compiler)
+    add("kspJs", libs.androidx.room.compiler)
 }

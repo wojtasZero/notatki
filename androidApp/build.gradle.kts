@@ -1,10 +1,13 @@
-import org.jetbrains.kotlin.buildtools.api.arguments.enums.JvmTarget
-import org.jetbrains.kotlin.gradle.internal.builtins.StandardNames.FqNames.target
-
 plugins {
    alias(libs.plugins.androidApplication)
    alias(libs.plugins.composeMultiplatform)
    alias(libs.plugins.composeCompiler)
+   alias(libs.plugins.ksp)
+   alias(libs.plugins.androidx.room)
+}
+
+room {
+   schemaDirectory("$projectDir/schemas")
 }
 
 dependencies {
@@ -32,12 +35,13 @@ android {
    }
    buildTypes {
       getByName("release") {
-         isMinifyEnabled = false
+         isMinifyEnabled = true
+         isShrinkResources = true
          signingConfig = signingConfigs.getByName("debug")
       }
    }
    compileOptions {
-      sourceCompatibility = JavaVersion.VERSION_11
-      targetCompatibility = JavaVersion.VERSION_11
+      sourceCompatibility = JavaVersion.VERSION_21
+      targetCompatibility = JavaVersion.VERSION_21
    }
 }

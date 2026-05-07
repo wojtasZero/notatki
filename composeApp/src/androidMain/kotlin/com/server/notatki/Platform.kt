@@ -4,6 +4,7 @@ import android.content.ClipData
 import android.os.Build
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.Clipboard
+import com.server.notatki.data.appContext
 
 class AndroidPlatform : Platform {
     override val name: String = "Android ${Build.VERSION.SDK_INT}"
@@ -17,4 +18,8 @@ actual suspend fun getClipboardText(clipboard: Clipboard): String? {
 
 actual suspend fun setClipboardText(clipboard: Clipboard, text: String) {
     clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("text", text)))
+}
+
+fun initContext(context: android.content.Context) {
+    appContext = context
 }

@@ -7,7 +7,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
 
-private val lightScheme = lightColorScheme(
+internal val lightScheme = lightColorScheme(
     primary = primaryLight,
     onPrimary = onPrimaryLight,
     primaryContainer = primaryContainerLight,
@@ -45,7 +45,7 @@ private val lightScheme = lightColorScheme(
     surfaceContainerHighest = surfaceContainerHighestLight,
 )
 
-val darkScheme = darkColorScheme(
+internal val darkScheme = darkColorScheme(
     primary = primaryDark,
     onPrimary = onPrimaryDark,
     primaryContainer = primaryContainerDark,
@@ -92,11 +92,15 @@ data class ColorFamily(
 )
 
 @Composable
-fun AppTheme(content: @Composable() () -> Unit) {
+fun AppTheme(
+    darkTheme: Boolean = isSystemInDarkTheme(),
+    content: @Composable () -> Unit
+) {
+    val colorScheme = if (darkTheme) darkScheme else lightScheme
     MaterialTheme(
-    colorScheme = darkScheme,
-    typography = AppTypography,
-    content = content
-  )
+        colorScheme = colorScheme,
+        typography = AppTypography,
+        content = content
+    )
 }
 
