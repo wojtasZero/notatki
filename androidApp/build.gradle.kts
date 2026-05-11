@@ -3,12 +3,12 @@ plugins {
    alias(libs.plugins.composeMultiplatform)
    alias(libs.plugins.composeCompiler)
    alias(libs.plugins.ksp)
-   alias(libs.plugins.androidx.room)
+   //alias(libs.plugins.room)
 }
 
-room {
+/*room3 {
    schemaDirectory("$projectDir/schemas")
-}
+}*/
 
 dependencies {
    implementation(projects.composeApp)

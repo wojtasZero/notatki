@@ -1,7 +1,12 @@
 package com.server.notatki.data
 
-import androidx.room.RoomDatabase
+import androidx.room3.Room
+import androidx.room3.RoomDatabase
+import org.dany.worker.createSQLiteWasmWorker
 
 actual fun getDatabaseBuilder(): RoomDatabase.Builder<AppDatabase> {
-    throw UnsupportedOperationException("Room is not supported on Wasm yet")
+    return Room.databaseBuilder<AppDatabase>(
+        name = "notatki.db",
+        factory = AppDatabaseConstructor::initialize
+    ).setDriver(createSQLiteWasmWorker())
 }
