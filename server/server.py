@@ -1,6 +1,7 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Header
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from typing import Optional
 import bcrypt
 import uvicorn
 import socket
@@ -23,7 +24,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         plain_bytes = plain_password.encode('utf-8')
         hashed_bytes = hashed_password.encode('utf-8')
         return bcrypt.checkpw(plain_bytes, hashed_bytes)
-    except ValueError:
+    except:
         return False
 
 def get_local_ip():
@@ -46,7 +47,8 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id TEXT,
             content TEXT,
-            timestamp INTEGER
+            timestamp INTEGER,
+            share_id TEXT UNIQUE
         )
         """)
         
@@ -58,6 +60,15 @@ def init_db():
             session_uuid TEXT
         )
         """)
+
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS note_access (
+            note_id INTEGER,
+            user_id TEXT,
+            PRIMARY KEY (note_id, user_id)
+        )
+        """)
+
         conn.commit()
 
 init_db()
@@ -70,8 +81,13 @@ class AuthRequest(BaseModel):
 
 class NoteRequest(BaseModel):
     username: str
-    session_id: str  # Wymagamy UUID do zapisu
+    session_id: str  #do weryfikacji
     content: str
+    note_id: Optional[int] = -1
+
+class InviteRequest(BaseModel):
+    note_id: int
+    target_username: str
 
 class ConnectionManager:
     def __init__(self):
@@ -146,6 +162,37 @@ async def logout(req: AuthRequest):
         conn.commit()
     return {"status": "ok", "message": "Wylogowano"}
 
+
+@app.post("/note/invite")
+async def invite_user(req: InviteRequest, username: str = Header(default=None), x_session_id: str = Header(default=None)):
+    if not is_session_valid(username, x_session_id):
+        return JSONResponse(status_code=401, content={"status": "error", "message": "Brak autoryzacji"})
+
+    with sqlite3.connect(DB_NAME) as conn:
+        cur = conn.cursor()
+        
+        note = cur.execute("SELECT id, share_id FROM notes WHERE id=? AND user_id=?", (req.note_id, username)).fetchone()
+        if not note:
+            return JSONResponse(status_code=403, content={"status": "error", "message": "Możesz udostępniać tylko swoje notatki!"})
+
+        share_id = note[1]
+
+        if not share_id:
+            share_id = str(uuid.uuid4())
+            cur.execute("UPDATE notes SET share_id=? WHERE id=?", (share_id, req.note_id))
+
+        target_user = cur.execute("SELECT id FROM users WHERE username=?", (req.target_username,)).fetchone()
+        if not target_user:
+            return JSONResponse(status_code=404, content={"status": "error", "message": "Nie znaleziono użytkownika!"})
+
+        try:
+            cur.execute("INSERT INTO note_access (note_id, user_id) VALUES (?, ?)", (req.note_id, req.target_username))
+            conn.commit()
+        except sqlite3.IntegrityError:
+            return {"status": "ok", "message": "Ten użytkownik ma już dostęp do notatki."}
+
+    return {"status": "ok", "share_id": share_id, "message": f"Udostępniono dla: {req.target_username}"}
+
 @app.websocket("/ws/notatki/{share_id}")
 async def websocket_endpoint(websocket: WebSocket, share_id: str):
     await manager.connect(websocket, share_id)
@@ -159,34 +206,80 @@ async def websocket_endpoint(websocket: WebSocket, share_id: str):
 @app.post("/note")
 async def save_note(note: NoteRequest):
     if not is_session_valid(note.username, note.session_id):
-        return JSONResponse(status_code=401, content={"status": "error", "message": "Brak dostępu lub sesja wygasła!"})
+        return JSONResponse(status_code=401, content={"status": "error", "message": "Brak dostępu!"})
 
     timestamp = int(time.time() * 1000)
 
     with sqlite3.connect(DB_NAME) as conn:
         cur = conn.cursor()
-        cur.execute(
-            "INSERT INTO notes(user_id, content, timestamp) VALUES (?, ?, ?)",
-            (note.username, note.content, timestamp)
-        )
-        conn.commit()
 
-    return {"status": "ok", "message": "Notatka zapisana!"}
+        if note.note_id is None or note.note_id == -1:
+            cur.execute(
+                "INSERT INTO notes(user_id, content, timestamp) VALUES (?, ?, ?)",
+                (note.username, note.content, timestamp)
+            )
+            new_note_id = cur.lastrowid
+            conn.commit()
+            
+            return {
+                "status": "ok", 
+                "message": "Utworzono nową notatkę!",
+                "extra": new_note_id
+            }
+            
+        else:
+            has_access = cur.execute("""
+                SELECT 1 FROM notes WHERE id=? AND user_id=?
+                UNION
+                SELECT 1 FROM note_access WHERE note_id=? AND user_id=?
+            """, (note.note_id, note.username, note.note_id, note.username)).fetchone()
+
+            if not has_access:
+                return JSONResponse(status_code=403, content={"status": "error", "message": "Nie możesz edytować tej notatki!"})
+
+            cur.execute(
+                "UPDATE notes SET content=?, timestamp=? WHERE id=?",
+                (note.content, timestamp, note.note_id)
+            )
+            conn.commit()
+
+            return {
+                "status": "ok", 
+                "message": "Notatka zaktualizowana!",
+                "extra": note.note_id
+            }
 
 @app.get("/notes/{username}")
 async def load_notes(username: str, x_session_id: str = Header(default=None)):
-    if not x_session_id or not is_session_valid(username, x_session_id):
+    if not is_session_valid(username, x_session_id):
         return JSONResponse(status_code=401, content={"status": "error", "message": "Brak dostępu lub sesja wygasła!"})
     
     with sqlite3.connect(DB_NAME) as conn:
         cur = conn.cursor()
-        rows = cur.execute(
-            "SELECT id, content, timestamp FROM notes WHERE user_id=? ORDER BY timestamp DESC",
-            (username,)
-        ).fetchall()
+        rows = cur.execute("""
+            SELECT id, content, timestamp, share_id
+            FROM notes 
+            WHERE user_id=?
+            
+            UNION
+            
+            SELECT n.id, n.content, n.timestamp, n.share_id
+            FROM notes n
+            JOIN note_access a ON n.id = a.note_id
+            WHERE a.user_id=?
+            
+            ORDER BY timestamp DESC
+        """, (username, username)).fetchall()
 
-    notes = [{"id": row[0], "content": row[1], "timestamp": row[2]} for row in rows]
+    notes = [{
+        "id": row[0], 
+        "content": row[1], 
+        "timestamp": row[2], 
+        "share_id": row[3]
+    } for row in rows]
+    
     return JSONResponse(content=notes)
+
 
 @app.delete("/note/{note_id}")
 async def delete_note(note_id: int, username: str = Header(default=None), x_session_id: str = Header(default=None)):
@@ -204,6 +297,7 @@ async def delete_note(note_id: int, username: str = Header(default=None), x_sess
         conn.commit()
 
     return {"status": "ok", "message": "Notatka usunięta!"}
+
 
 if __name__ == "__main__":
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)

@@ -63,12 +63,15 @@ import androidx.compose.material.icons.filled.ContentCut
 import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.FormatSize
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Translate
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -150,6 +153,7 @@ import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpMethod
+import io.ktor.http.HttpStatusCode
 import io.ktor.http.contentType
 import io.ktor.http.encodeURLPath
 import io.ktor.http.encodeURLPathPart
@@ -185,18 +189,33 @@ data class LoginResponse(val status: String, val message: String, val session_id
 data class NoteRequest(
     val username: String,
     val session_id: String,
-    val content: String
+    val content: String,
+    val note_id: Long? = null
 )
 
 @Serializable
 data class Note(
     val id: Long = 0,
     val content: String,
-    val timestamp: Long = Clock.System.now().toEpochMilliseconds()
+    val timestamp: Long = Clock.System.now().toEpochMilliseconds(),
+    val share_id: String? = null
 )
 
 @Serializable
-data class Response(val status: String, val message: String)
+data class Response(val status: String, val message: String, val extra: Long? = null)
+
+@Serializable
+data class InviteRequest(
+    val note_id: Long,
+    val target_username: String
+)
+
+@Serializable
+data class InviteResponse(
+    val status: String,
+    val share_id: String? = null,
+    val message: String
+)
 
 @OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -214,6 +233,7 @@ fun App() {
 
     // --- Editor State ---
     var noteContent by remember { mutableStateOf(TextFieldValue("")) }
+    var currentNoteId by remember { mutableStateOf(-1L) }
     val undoStack = remember { mutableStateListOf<TextFieldValue>() }
     val redoStack = remember { mutableStateListOf<TextFieldValue>() }
     var fontSize by remember { mutableStateOf(20) }
@@ -225,6 +245,7 @@ fun App() {
     var currentScreen by remember { mutableStateOf(0) } // 0: Editor, 1: Saved Notes
     var isSetupDialogOpen by remember { mutableStateOf(true) }
     var isInfoDialogOpen by remember { mutableStateOf(false) }
+    var isShareDialogOpen by remember { mutableStateOf(false) }
     var infoText by remember { mutableStateOf("") }
 
     // --- Network State ---
@@ -270,9 +291,10 @@ fun App() {
         try {
             val response: HttpResponse = client.post("$serverUrl/note") {
                 contentType(ContentType.Application.Json)
-                setBody(NoteRequest(username, sessionId, noteContent.text))
+                setBody(NoteRequest(username, sessionId, noteContent.text, currentNoteId))
             }
             val obj = Json.decodeFromString<Response>(response.bodyAsText())
+            currentNoteId = obj.extra ?: -1L
             toast(obj.message)
         } catch (e: Exception) {
             toast("Błąd zapisu: ${e.message}")
@@ -301,6 +323,9 @@ fun App() {
             client.delete("$serverUrl/note/${note.id}") {
                 header("username", username)
                 header("X-Session-ID", sessionId)
+            }
+            if (currentNoteId == note.id) {
+                currentNoteId = -1L
             }
         } catch (e: Exception) {
             toast("Błąd usuwania: ${e.message}")
@@ -343,6 +368,28 @@ fun App() {
             } catch (e: Exception) {
                 toast("Błąd połączenia: ${e.message}")
             }
+        }
+    }
+
+    suspend fun inviteUserToNote(noteId: Long, targetUsername: String): InviteResponse? {
+        return try {
+            val response = client.post("$serverUrl/note/invite") {
+                header("X-Session-ID", sessionId)
+                header("username", username)
+                contentType(ContentType.Application.Json)
+                setBody(InviteRequest(noteId, targetUsername))
+            }
+
+            if (response.status == HttpStatusCode.OK) {
+                shareId = response.body<InviteResponse>().share_id ?: throw Exception("Coś poszło nie tak")
+                connectToWebsocket(shareId)
+                response.body<InviteResponse>()
+            } else {
+                val errorBody = response.body<InviteResponse>()
+                errorBody
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
@@ -413,6 +460,14 @@ fun App() {
                             }
                         }
                     },
+                    onShare = {
+                        if (currentNoteId == -1L) {
+                            toast("Najpierw zapisz notatkę!")
+                        }
+                        else {
+                            isShareDialogOpen = true
+                        }
+                    },
                     onToggleToolbar = { showToolbar = !showToolbar },
                     onFontSizeChange = { fontSize = it },
                     onToggleWrap = { wrapText = !wrapText },
@@ -421,6 +476,7 @@ fun App() {
                     onDelete = {
                         undoStack.add(noteContent)
                         noteContent = TextFieldValue("")
+                        currentNoteId = -1L
                         scope.launch { outgoingTextFlow.emit("") }
                     },
                     onSave = { scope.launch { saveNote() } },
@@ -434,6 +490,8 @@ fun App() {
                         onNoteSelected = { note ->
                             undoStack.add(noteContent)
                             noteContent = TextFieldValue(note.content)
+                            currentNoteId = note.id
+                            note.share_id?.let { sid -> connectToWebsocket(sid) }
                             currentScreen = 0
                         },
                         onClose = { currentScreen = 0 },
@@ -446,10 +504,13 @@ fun App() {
                         initialUrl = serverUrl,
                         initialUsername = username,
                         initialPassword = password,
-                        initialShareId = shareId,
                         clipboard = clipboard,
                         onDismiss = { isSetupDialogOpen = false },
-                        onLogin = { url, user, pass, sid ->
+                        onLogin = { url, user, pass ->
+                            if (user == "Gość" && pass.isEmpty()) {
+                                isSetupDialogOpen = false
+                                return@SetupDialog
+                            }
                             scope.launch {
                                 try {
                                     val response: HttpResponse = client.post("$url/login") {
@@ -462,10 +523,8 @@ fun App() {
                                         serverUrl = url
                                         username = user
                                         password = pass
-                                        shareId = sid
                                         isSetupDialogOpen = false
                                         toast(loginResp.message)
-                                        connectToWebsocket(sid)
                                     } else {
                                         val err = Json.decodeFromString<Response>(response.bodyAsText())
                                         toast(err.message)
@@ -494,8 +553,56 @@ fun App() {
                 }
                 Toast(toastMessage, hazeState)
 
+                if (isShareDialogOpen) {
+                    ShareDialog(
+                        onDismiss = { isShareDialogOpen = false },
+                        onShare = { target ->
+                            if (currentNoteId == -1L) {
+                                toast("Najpierw zapisz notatkę!")
+                                return@ShareDialog
+                            }
+                            scope.launch {
+                                val res = inviteUserToNote(currentNoteId, target)
+                                toast(res?.message ?: "Błąd połączenia")
+                            }
+                        }
+                    )
+                }
+
                 if (isInfoDialogOpen) {
                     InfoDialog(infoText = infoText, onDismiss = { isInfoDialogOpen = false })
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ShareDialog(onDismiss: () -> Unit, onShare: (String) -> Unit) {
+    var inviteUsername by remember { mutableStateOf("") }
+
+    Dialog(onDismissRequest = onDismiss) {
+        Column(Modifier.clip(RoundedCornerShape(28.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(24.dp)) {
+            Text("Udostępnij notatkę", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(bottom = 16.dp))
+            TextField(
+                value = inviteUsername,
+                onValueChange = { inviteUsername = it },
+                label = { Text("Nazwa użytkownika") },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true
+            )
+            Spacer(Modifier.height(24.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(onClick = onDismiss, modifier = Modifier.weight(1f)) { Text("Anuluj") }
+                Button(
+                    onClick = {
+                        onShare(inviteUsername)
+                        onDismiss()
+                    },
+                    modifier = Modifier.weight(1f),
+                    enabled = inviteUsername.isNotBlank()
+                ) {
+                    Text("Udostępnij")
                 }
             }
         }
@@ -555,6 +662,7 @@ private fun EditorScreen(
     onCopy: () -> Unit,
     onCut: () -> Unit,
     onPaste: () -> Unit,
+    onShare: () -> Unit,
     onToggleToolbar: () -> Unit,
     onFontSizeChange: (Int) -> Unit,
     onToggleWrap: () -> Unit,
@@ -601,6 +709,7 @@ private fun EditorScreen(
             onCopy = onCopy,
             onCut = onCut,
             onPaste = onPaste,
+            onShare = onShare,
             menuExp = menuExp,
             onMenuExpChange = { menuExp = it },
             fontSize = fontSize,
@@ -634,6 +743,7 @@ private fun BottomToolbars(
     onCopy: () -> Unit,
     onCut: () -> Unit,
     onPaste: () -> Unit,
+    onShare: () -> Unit,
     menuExp: Int,
     onMenuExpChange: (Int) -> Unit,
     fontSize: Int,
@@ -729,9 +839,10 @@ private fun BottomToolbars(
             FloatingActionButtonMenuItem({ onSettings(); onMenuExpChange(0) }, { Text("Ustawienia") }, { Icon(Icons.Rounded.Settings, null) })
             FloatingActionButtonMenuItem({ onInfo(); onMenuExpChange(0) }, { Text("Informacje") }, { Icon(Icons.Rounded.Info, null) })
             FloatingActionButtonMenuItem({ uri.openUri("https://translate.google.com/?text=${noteText.encodeURLPathPart()}"); onMenuExpChange(0) }, { Text("Tłumacz") }, { Icon(Icons.Rounded.Translate, null) })
-            FloatingActionButtonMenuItem({ onDelete(); onMenuExpChange(0) }, { Text("Usuń") }, { Icon(Icons.Rounded.Close, null) })
+            FloatingActionButtonMenuItem({ onShare(); onMenuExpChange(0) }, { Text("Udostępnij") }, { Icon(Icons.Rounded.Share, null) })
             FloatingActionButtonMenuItem({ onSave(); onMenuExpChange(0) }, { Text("Zapisz") }, { Icon(Icons.Rounded.Save, null) })
             FloatingActionButtonMenuItem({ onOpenNotes(); onMenuExpChange(0) }, { Text("Otwórz") }, { Icon(Icons.AutoMirrored.Rounded.OpenInNew, null) })
+            FloatingActionButtonMenuItem({ onDelete(); onMenuExpChange(0) }, { Text("Nowy") }, { Icon(Icons.Rounded.Delete, null) })
         }
     }
 }
@@ -811,17 +922,15 @@ private fun SetupDialog(
     initialUrl: String,
     initialUsername: String,
     initialPassword: String,
-    initialShareId: String,
     clipboard: Clipboard,
     onDismiss: () -> Unit,
-    onLogin: (String, String, String, String) -> Unit,
+    onLogin: (String, String, String) -> Unit,
     onRegister: (String, String, String) -> Unit,
     toast: @Composable () -> Unit
 ) {
     var url by remember { mutableStateOf(initialUrl) }
     var user by remember { mutableStateOf(initialUsername) }
     var pass by remember { mutableStateOf(initialPassword) }
-    var sid by remember { mutableStateOf(initialShareId) }
     val scope = rememberCoroutineScope()
 
     Dialog(onDismissRequest = onDismiss) {
@@ -839,11 +948,11 @@ private fun SetupDialog(
                 Spacer(Modifier.height(8.dp))
                 TextField(value = pass, onValueChange = { pass = it }, label = { Text("Hasło") }, visualTransformation = PasswordVisualTransformation(), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password), modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(8.dp))
-                TextField(value = sid, onValueChange = { sid = it }, label = { Text("ID sesji (WebSocket)") }, modifier = Modifier.fillMaxWidth())
-                Spacer(Modifier.height(8.dp))
+                /*TextField(value = sid, onValueChange = { sid = it }, label = { Text("ID sesji (WebSocket)") }, modifier = Modifier.fillMaxWidth())
+                Spacer(Modifier.height(8.dp))*/
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = { onRegister(url, user, pass) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(bottomStart = 16.dp)) { Text("Zarejestruj") }
-                    Button(onClick = { onLogin(url, user, pass, sid) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(bottomEnd = 16.dp)) { Text("Zaloguj") }
+                    Button(onClick = { onLogin(url, user, pass) }, modifier = Modifier.weight(1f), shape = RoundedCornerShape(bottomEnd = 16.dp)) { Text("Zaloguj") }
                 }
             }
             toast.invoke()
