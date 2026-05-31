@@ -10,23 +10,10 @@ import sqlite3
 import time
 import uuid
 
+#stale zmienne
 DB_NAME = "notes.db"
 GUEST = "Gość"
 
-
-def get_password_hash(password: str) -> str:
-    pwd_bytes = password.encode('utf-8')
-    salt = bcrypt.gensalt()
-    hashed_bytes = bcrypt.hashpw(pwd_bytes, salt)
-    return hashed_bytes.decode('utf-8')
-
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    try:
-        plain_bytes = plain_password.encode('utf-8')
-        hashed_bytes = hashed_password.encode('utf-8')
-        return bcrypt.checkpw(plain_bytes, hashed_bytes)
-    except:
-        return False
 
 def get_local_ip():
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -37,12 +24,12 @@ def get_local_ip():
         s.close()
     return ip
 
-print("Lokalne IP:", get_local_ip())
-
+#tworzenie tabel jesli nie istnieja
 def init_db():
     with sqlite3.connect(DB_NAME) as conn:
         cur = conn.cursor()
         
+        #tabela notatek
         cur.execute("""
         CREATE TABLE IF NOT EXISTS notes (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -53,6 +40,7 @@ def init_db():
         )
         """)
         
+        #tabela uzytkowników
         cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,6 +50,7 @@ def init_db():
         )
         """)
 
+        #tabela dostepu
         cur.execute("""
         CREATE TABLE IF NOT EXISTS note_access (
             note_id INTEGER,
@@ -72,25 +61,40 @@ def init_db():
 
         conn.commit()
 
-init_db()
+def is_session_valid(username: str, session_id: str) -> bool:
+    with sqlite3.connect(DB_NAME) as conn:
+        cur = conn.cursor()
+        user = cur.execute(
+            "SELECT 1 FROM users WHERE username=? AND session_uuid=?", 
+            (username, session_id)
+        ).fetchone()
+        return user is not None
+    
+def get_password_hash(password: str) -> str:
+    #bcrypt wymaga bajtow; kodujemy do utf8
+    pwd_bytes = password.encode('utf-8')
+    salt = bcrypt.gensalt()
+    hashed_bytes = bcrypt.hashpw(pwd_bytes, salt)
+    #z powrotem do stringa, gotowe do zapisu w bazie danych
+    return hashed_bytes.decode('utf-8')
 
-app = FastAPI()
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    try:
+        plain_bytes = plain_password.encode('utf-8')
+        hashed_bytes = hashed_password.encode('utf-8')
+        return bcrypt.checkpw(plain_bytes, hashed_bytes)
+    except:
+        return False
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
+#klasy do serializowania
 class AuthRequest(BaseModel):
     username: str
     password: str
 
 class NoteRequest(BaseModel):
     username: str
-    session_id: str  #do weryfikacji
+    session_id: str
     content: str
     note_id: Optional[int] = -1
 
@@ -98,6 +102,7 @@ class InviteRequest(BaseModel):
     note_id: int
     target_username: str
 
+#websocket
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[str, list[WebSocket]] = {}
@@ -120,15 +125,29 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 
-def is_session_valid(username: str, session_id: str) -> bool:
-    with sqlite3.connect(DB_NAME) as conn:
-        cur = conn.cursor()
-        user = cur.execute(
-            "SELECT 1 FROM users WHERE username=? AND session_uuid=?", 
-            (username, session_id)
-        ).fetchone()
-        return user is not None
+app = FastAPI()
+#workaround 405 method not allowed
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+#endpointy do kolaboratywnych notatek
+@app.websocket("/ws/notatki/{share_id}")
+async def websocket_endpoint(websocket: WebSocket, share_id: str):
+    await manager.connect(websocket, share_id)
+    try:
+        while True:
+            data = await websocket.receive_text()
+            await manager.broadcast(data, share_id, sender=websocket)
+    except WebSocketDisconnect:
+        manager.disconnect(websocket, share_id)
+
+
+#endpointy do auth
 @app.post("/register")
 async def register(req: AuthRequest):
     if req.username == GUEST or len(req.username) < 3:
@@ -165,35 +184,40 @@ async def login(req: AuthRequest):
 
 @app.post("/logout")
 async def logout(req: AuthRequest):
+    #deaktywacja uuid
     with sqlite3.connect(DB_NAME) as conn:
         cur = conn.cursor()
         cur.execute("UPDATE users SET session_uuid=NULL WHERE username=?", (req.username,))
         conn.commit()
     return {"status": "ok", "message": "Wylogowano"}
 
-
 @app.post("/note/invite")
-async def invite_user(req: InviteRequest, username: str = Header(default=None), x_session_id: str = Header(default=None)):
-    if not is_session_valid(username, x_session_id):
+async def invite_user(req: InviteRequest, username: str = Header(default=None), session_id: str = Header(default=None)):
+    #czy zalogowany
+    if not is_session_valid(username, session_id):
         return JSONResponse(status_code=401, content={"status": "error", "message": "Brak autoryzacji"})
 
     with sqlite3.connect(DB_NAME) as conn:
         cur = conn.cursor()
         
+        #walidacja dostepu
         note = cur.execute("SELECT id, share_id FROM notes WHERE id=? AND user_id=?", (req.note_id, username)).fetchone()
         if not note:
             return JSONResponse(status_code=403, content={"status": "error", "message": "Możesz udostępniać tylko swoje notatki!"})
 
         share_id = note[1]
 
+        #przypisywanie share uuid
         if not share_id:
             share_id = str(uuid.uuid4())
             cur.execute("UPDATE notes SET share_id=? WHERE id=?", (share_id, req.note_id))
 
+        #czy zaproszony istnieje
         target_user = cur.execute("SELECT id FROM users WHERE username=?", (req.target_username,)).fetchone()
         if not target_user:
             return JSONResponse(status_code=404, content={"status": "error", "message": "Nie znaleziono użytkownika!"})
 
+        #ok
         try:
             cur.execute("INSERT INTO note_access (note_id, user_id) VALUES (?, ?)", (req.note_id, req.target_username))
             conn.commit()
@@ -201,16 +225,6 @@ async def invite_user(req: InviteRequest, username: str = Header(default=None), 
             return {"status": "ok", "message": "Ten użytkownik ma już dostęp do notatki."}
 
     return {"status": "ok", "share_id": share_id, "message": f"Udostępniono dla: {req.target_username}"}
-
-@app.websocket("/ws/notatki/{share_id}")
-async def websocket_endpoint(websocket: WebSocket, share_id: str):
-    await manager.connect(websocket, share_id)
-    try:
-        while True:
-            data = await websocket.receive_text()
-            await manager.broadcast(data, share_id, sender=websocket)
-    except WebSocketDisconnect:
-        manager.disconnect(websocket, share_id)
 
 @app.post("/note")
 async def save_note(note: NoteRequest):
@@ -222,6 +236,7 @@ async def save_note(note: NoteRequest):
     with sqlite3.connect(DB_NAME) as conn:
         cur = conn.cursor()
 
+        #zapisz nowy
         if note.note_id is None or note.note_id == -1:
             cur.execute(
                 "INSERT INTO notes(user_id, content, timestamp) VALUES (?, ?, ?)",
@@ -236,6 +251,7 @@ async def save_note(note: NoteRequest):
                 "extra": new_note_id
             }
             
+        #nadpisz
         else:
             has_access = cur.execute("""
                 SELECT 1 FROM notes WHERE id=? AND user_id=?
@@ -259,8 +275,8 @@ async def save_note(note: NoteRequest):
             }
 
 @app.get("/notes/{username}")
-async def load_notes(username: str, x_session_id: str = Header(default=None)):
-    if not is_session_valid(username, x_session_id):
+async def load_notes(username: str, session_id: str = Header(default=None)):
+    if not is_session_valid(username, session_id):
         return JSONResponse(status_code=401, content={"status": "error", "message": "Brak dostępu lub sesja wygasła!"})
     
     with sqlite3.connect(DB_NAME) as conn:
@@ -289,10 +305,9 @@ async def load_notes(username: str, x_session_id: str = Header(default=None)):
     
     return JSONResponse(content=notes)
 
-
 @app.delete("/note/{note_id}")
-async def delete_note(note_id: int, username: str = Header(default=None), x_session_id: str = Header(default=None)):
-    if not username or not x_session_id or not is_session_valid(username, x_session_id):
+async def delete_note(note_id: int, username: str = Header(default=None), session_id: str = Header(default=None)):
+    if not username or not session_id or not is_session_valid(username, session_id):
         return JSONResponse(status_code=401, content={"status": "error", "message": "Brak dostępu!"})
 
     with sqlite3.connect(DB_NAME) as conn:
@@ -309,4 +324,6 @@ async def delete_note(note_id: int, username: str = Header(default=None), x_sess
 
 
 if __name__ == "__main__":
+    print("Lokalne IP:", get_local_ip())
+    init_db()
     uvicorn.run("server:app", host="0.0.0.0", port=8000, reload=True)

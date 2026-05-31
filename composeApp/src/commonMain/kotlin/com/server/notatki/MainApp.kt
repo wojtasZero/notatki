@@ -310,7 +310,7 @@ fun App() {
         val encodedUsername = username.encodeURLPath()
         return try {
             client.get("$serverUrl/notes/$encodedUsername") {
-                header("X-Session-ID", sessionId)
+                header("session_id", sessionId)
             }.body<List<Note>>()
         } catch (e: Exception) {
             toast("Błąd ładowania: ${e.message}")
@@ -322,7 +322,7 @@ fun App() {
         try {
             client.delete("$serverUrl/note/${note.id}") {
                 header("username", username)
-                header("X-Session-ID", sessionId)
+                header("session_id", sessionId)
             }
             if (currentNoteId == note.id) {
                 currentNoteId = -1L
@@ -374,7 +374,7 @@ fun App() {
     suspend fun inviteUserToNote(noteId: Long, targetUsername: String): InviteResponse? {
         return try {
             val response = client.post("$serverUrl/note/invite") {
-                header("X-Session-ID", sessionId)
+                header("session_id", sessionId)
                 header("username", username)
                 contentType(ContentType.Application.Json)
                 setBody(InviteRequest(noteId, targetUsername))
